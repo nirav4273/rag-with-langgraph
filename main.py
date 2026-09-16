@@ -1,41 +1,54 @@
-from langgraph.graph import START, StateGraph, END
-from pydantic import BaseModel
+from langgraph.graph import StateGraph, START, END
+from pydantic import BaseModel, SecretStr
+from typing import List, Annotated
+from langchain_groq import ChatGroq
+from langgraph.graph.message import add_messages
+from langgraph.checkpoint.memory import InMemorySaver
+from dotenv import load_dotenv
+import os
 
+load_dotenv()
 
-class GreetModel(BaseModel):
-    message: str = ""
+groq_api_key = SecretStr(os.getenv('GROQ_API_KEY', ''))
+if not groq_api_key:
+    raise RuntimeError('Set GROQ_API_KEY first: $env:GROQ_API_KEY="your_api_key"')
 
-graph = StateGraph(GreetModel)
+groq_model = os.getenv('GROQ_MODEL', '')
 
-def greet(state: GreetModel):
-    state.message = state.message
+class ChatMessage(BaseModel):
+    messages: Annotated[list, add_messages]
+
+graph = StateGraph(ChatMessage)
+
+memory = InMemorySaver()
+llm = ChatGroq(
+    model=groq_model,
+    api_key=groq_api_key
+)
+
+def ChatBotNode(state: ChatMessage) -> ChatMessage:
+    result = llm.invoke(state.messages)
+    state.messages = [result]
     return state
 
+graph.add_node('chatBot', ChatBotNode)
 
-def prefix(state: GreetModel):
-    state.message = " ###> " + state.message
-    return state
+graph.add_edge(START, 'chatBot')
+graph.add_edge('chatBot', END)
 
-def postfix(state: GreetModel):
-    state.message = state.message + " <$$$$ "
-    return state
+final_graph = graph.compile(checkpointer=memory)
 
-## Connect node with function and name
-graph.add_node('greet', greet)
-graph.add_node('prefix', prefix)
-graph.add_node('postfix', postfix)
+while True:
+    query = input("Ask : ")
+    if query:
+        response = final_graph.invoke(ChatMessage(messages=[{
+            'role': 'human',
+            'content': query
+        }]), {
+            'configurable': {
+                'thread_id': 'test'
+            }
+        })
 
-### Connect with edges with start to end 
-graph.add_edge(START, 'prefix')
-graph.add_edge('prefix', 'greet')
-graph.add_edge('greet', 'postfix')
-graph.add_edge('postfix', END)
-
-final_graph = graph.compile()
-
-
-
-result = final_graph.invoke(GreetModel(message='Hello I am Nikk'))
-print(result)
-
-print(final_graph.get_graph().draw_mermaid())
+        for message in response['messages']:
+            print(">>>>", type(message) ,">>>> ",message.content)
