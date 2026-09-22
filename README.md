@@ -21,8 +21,8 @@ START -> ask_question -> (vector_query -> llm_query -> result_node -> ask_questi
                       \-> end_node -> END      (when the user types "exit")
 ```
 
-- `ask_question` reads a question from the console.
-- `route_after_ask` is a conditional edge: `exit` ends the graph, anything else goes to retrieval.
+- `ask_question` calls `interrupt("Asked question: ")`, which pauses the graph and saves state to the checkpoint for the `thread_id`.
+- It then returns a `Command(update={"user_question": ...}, goto=...)`: `exit` goes to `end_node`, anything else goes to `vector_query`.
 - `vector_query` retrieves the top 5 chunks; `llm_query` answers from that context.
 - `result_node` prints the answer and appends the question to `history` in state.
 - History is passed to the prompt so you can ask things like "what did I ask earlier?". State is persisted per `thread_id` with an `InMemorySaver` checkpointer (lost when the process exits).
@@ -58,6 +58,25 @@ uv run 04_rag_langgraph.py
 ```
 
 Type a question at the `Asked question:` prompt, or `exit` to quit.
+
+### Interrupt usage
+
+The script drives the graph with a human-in-the-loop pattern (requires a checkpointer and a `thread_id`):
+
+```python
+config = {"configurable": {"thread_id": "123"}}
+result = graph.invoke({...}, config=config)          # runs until the first interrupt()
+
+while "__interrupt__" in result:
+    prompt = result["__interrupt__"][0].value        # the value passed to interrupt()
+    answer = input(prompt)
+    result = graph.invoke(Command(resume=answer), config=config)  # resume from the checkpoint
+```
+
+- `interrupt(value)` pauses the graph and surfaces `value` under `__interrupt__` in the result.
+- `Command(resume=answer)` reloads the checkpoint and re-runs the interrupted node; `interrupt()` now returns `answer`.
+- The node restarts from its beginning on resume, so keep side effects before `interrupt()` idempotent.
+- Use the same `thread_id` for every call, otherwise the history and pending interrupt are not found.
 
 ## Dependencies
 

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, SecretStr
 from langchain_community.document_loaders import PyPDFLoader
@@ -5,8 +7,10 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_community.vectorstores import Chroma, InMemoryVectorStore
 import os
+from langchain_core.runnables import RunnableConfig
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import Command, interrupt
 from langgraph.checkpoint.memory import InMemorySaver
 load_dotenv()
 
@@ -80,22 +84,19 @@ def execute(query):
 #####
 class QnAState(BaseModel):
     user_question: str = Field(description="Asked question by the user", default="")
-    # docs: list[str] = Field(description="Docs which found using vector search", default=[])
     result: str = Field(description="Ans for the asked question", default="")
     context: str = Field(description="Context for the LLM model with question to get answer", default= "")
     history: list[str] = Field(description="Questions asked so far in this session", default=[])
 
 graph = StateGraph(QnAState)
 
-def ask_question(state: QnAState) -> QnAState:
-    query = input("Asked question: ")
-    state.user_question = query
-    return state;
+def ask_question(state: QnAState) -> Command[Literal["vector_query", "end_node"]]:
+    query = interrupt("Asked question: ")
+    ## Resumt from this point once `Command` invoke
+    goto = "end_node" if query.strip().lower() == "exit" else "vector_query"
 
-def route_after_ask(state: QnAState):
-    if state.user_question.strip().lower() == 'exit':
-        return 'end_node'
-    return 'vector_query'
+    ### Return to next point based on added input by user
+    return Command(update={"user_question": query}, goto=goto)
 
 
 docs = load_file()
@@ -127,7 +128,6 @@ graph.add_node('end_node', end_node)
 
 
 graph.add_edge(START, 'ask_question')
-graph.add_conditional_edges('ask_question', route_after_ask, ['vector_query', 'end_node'])
 graph.add_edge('vector_query', 'llm_query')
 graph.add_edge('llm_query', 'result_node')
 graph.add_edge('result_node', 'ask_question')
@@ -135,8 +135,15 @@ graph.add_edge('end_node', END)
 
 graph = graph.compile(checkpointer=memory);
 
-graph.invoke(QnAState(), config={"recursion_limit": 1000, 'configurable': {
-    'thread_id': '123'
-}})
+config: RunnableConfig = {'configurable': {'thread_id': '123'}}
+### Normal invoke
+result = graph.invoke(QnAState(), config=config)
 
+# Each interrupt pauses the graph; read the question in the CLI and resume with it
+while '__interrupt__' in result:
+    prompt = result['__interrupt__'][0].value
+    answer = input(prompt)
+    
+    ## invoke with command resumt with `interrupted` function point
+    result = graph.invoke(Command(resume=answer), config=config)
     
